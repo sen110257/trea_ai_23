@@ -40,6 +40,7 @@
         <p class="game-subtitle">操控小点躲避移动的线条障碍</p>
         <div class="controls-hint">
           <p>键盘：方向键 / WASD</p>
+          <p>鼠标：按住拖拽控制</p>
           <p>触屏：滑动控制</p>
         </div>
         <button class="game-btn start-btn" @click="startGame">
@@ -165,6 +166,15 @@ const touch = {
   currentY: 0
 }
 
+// 鼠标状态
+const mouse = {
+  active: false,
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  currentY: 0
+}
+
 // 障碍物数组
 let obstacles = []
 let powerups = []
@@ -230,8 +240,15 @@ const initCanvas = () => {
 const createObstacle = () => {
   const types = Object.values(OBSTACLE_TYPES)
   const type = types[Math.floor(Math.random() * types.length)]
-  const baseSpeed = 3 + difficultyMultiplier
+  
+  // 初始速度更低，递增更平滑
+  // 初始速度: 1.5，每20秒增加0.3倍，上限5倍
+  const baseSpeed = 1.5 + Math.min(difficultyMultiplier, 5) * 0.5
   const speed = isSlowMode.value ? baseSpeed * 0.5 : baseSpeed
+  
+  // 初始线条更短，随难度递增变长
+  // 初始长度: 80-150，随难度增加到150-300
+  const lengthMultiplier = 1 + Math.min(difficultyMultiplier, 3) * 0.5
   
   let obstacle = {
     type,
@@ -244,7 +261,7 @@ const createObstacle = () => {
   switch (type) {
     case OBSTACLE_TYPES.HORIZONTAL:
       obstacle.y = Math.random() * canvasHeight
-      obstacle.length = Math.random() * 200 + 100
+      obstacle.length = (Math.random() * 120 + 80) * lengthMultiplier
       obstacle.x = -obstacle.length
       obstacle.vx = speed
       obstacle.vy = 0
@@ -252,7 +269,7 @@ const createObstacle = () => {
       
     case OBSTACLE_TYPES.VERTICAL:
       obstacle.x = Math.random() * canvasWidth
-      obstacle.length = Math.random() * 200 + 100
+      obstacle.length = (Math.random() * 120 + 80) * lengthMultiplier
       obstacle.y = -obstacle.length
       obstacle.vx = 0
       obstacle.vy = speed
@@ -260,7 +277,7 @@ const createObstacle = () => {
       
     case OBSTACLE_TYPES.DIAGONAL:
       const fromLeft = Math.random() > 0.5
-      obstacle.length = Math.random() * 150 + 80
+      obstacle.length = (Math.random() * 100 + 60) * lengthMultiplier
       obstacle.y = -obstacle.length
       obstacle.x = fromLeft ? -obstacle.length : canvasWidth + obstacle.length
       obstacle.vx = fromLeft ? speed * 0.7 : -speed * 0.7
@@ -310,14 +327,45 @@ const updatePlayer = () => {
   let dx = 0
   let dy = 0
   
+  // 鼠标拖拽控制（最高优先级，实时跟随）
+  if (mouse.active) {
+    // 计算鼠标相对于Canvas的坐标
+    const canvas = gameCanvas.value
+    const rect = canvas.getBoundingClientRect()
+    const mouseCanvasX = mouse.currentX - rect.left
+    const mouseCanvasY = mouse.currentY - rect.top
+    
+    // 直接移动到鼠标位置，使用平滑插值
+    const targetX = mouseCanvasX
+    const targetY = mouseCanvasY
+    
+    // 计算方向向量
+    const dirX = targetX - player.x
+    const dirY = targetY - player.y
+    const distance = Math.sqrt(dirX * dirX + dirY * dirY)
+    
+    // 如果距离很小，直接定位
+    if (distance < 2) {
+      player.x = targetX
+      player.y = targetY
+    } else {
+      // 平滑移动，速度随距离增加
+      const moveSpeed = Math.min(player.speed * 1.5, distance * 0.15)
+      const normalizedX = dirX / distance
+      const normalizedY = dirY / distance
+      dx = normalizedX * moveSpeed
+      dy = normalizedY * moveSpeed
+    }
+  }
   // 键盘控制
-  if (keys.up) dy -= player.speed
-  if (keys.down) dy += player.speed
-  if (keys.left) dx -= player.speed
-  if (keys.right) dx += player.speed
-  
+  else if (keys.up || keys.down || keys.left || keys.right) {
+    if (keys.up) dy -= player.speed
+    if (keys.down) dy += player.speed
+    if (keys.left) dx -= player.speed
+    if (keys.right) dx += player.speed
+  }
   // 触屏控制
-  if (touch.active) {
+  else if (touch.active) {
     const touchDx = touch.currentX - touch.startX
     const touchDy = touch.currentY - touch.startY
     const distance = Math.sqrt(touchDx * touchDx + touchDy * touchDy)
@@ -330,8 +378,8 @@ const updatePlayer = () => {
     }
   }
   
-  // 限制对角线速度
-  if (dx !== 0 && dy !== 0) {
+  // 限制对角线速度（仅键盘和触屏）
+  if ((keys.up || keys.down || keys.left || keys.right || touch.active) && dx !== 0 && dy !== 0) {
     const factor = 1 / Math.sqrt(2)
     dx *= factor
     dy *= factor
@@ -698,16 +746,33 @@ const gameLoop = (timestamp) => {
   // 更新游戏时间和难度
   survivalTime.value += deltaTime
   score.value = Math.floor(survivalTime.value * 10)
-  difficultyMultiplier = 1 + Math.floor(survivalTime.value / 30) * 0.5
+  
+  // 难度平滑递增：每20秒增加0.3倍，上限5倍
+  // 初始难度非常低，给新手适应时间
+  difficultyMultiplier = Math.min(Math.floor(survivalTime.value / 20) * 0.3, 5)
   
   // 随机生成障碍物
-  const spawnChance = 0.02 + difficultyMultiplier * 0.01
-  if (Math.random() < spawnChance) {
+  // 初始生成概率极低(0.5%)，随难度递增最高到5%
+  // 同时，存活时间越长，允许同时存在的障碍物越多
+  const baseSpawnChance = 0.005
+  const maxSpawnChance = 0.05
+  const spawnChance = Math.min(baseSpawnChance + difficultyMultiplier * 0.009, maxSpawnChance)
+  
+  // 限制同时存在的障碍物数量，避免过度拥挤
+  // 初始上限5个，每20秒增加2个，上限20个
+  const maxObstacles = Math.min(5 + Math.floor(difficultyMultiplier * 4), 20)
+  
+  if (Math.random() < spawnChance && obstacles.length < maxObstacles) {
     createObstacle()
   }
   
   // 随机生成道具
-  if (Math.random() < 0.002) {
+  // 初始概率较高(0.8%)，增加趣味性
+  // 道具数量限制：最多同时存在3个
+  const powerupChance = 0.008
+  const maxPowerups = 3
+  
+  if (Math.random() < powerupChance && powerups.length < maxPowerups) {
     createPowerup()
   }
   
@@ -877,6 +942,32 @@ const handleTouchEnd = () => {
   touch.active = false
 }
 
+// 鼠标事件处理
+const handleMouseDown = (e) => {
+  if (gameState.value !== 'playing') return
+  
+  mouse.active = true
+  mouse.startX = e.clientX
+  mouse.startY = e.clientY
+  mouse.currentX = e.clientX
+  mouse.currentY = e.clientY
+}
+
+const handleMouseMove = (e) => {
+  if (!mouse.active || gameState.value !== 'playing') return
+  
+  mouse.currentX = e.clientX
+  mouse.currentY = e.clientY
+}
+
+const handleMouseUp = () => {
+  mouse.active = false
+}
+
+const handleMouseLeave = () => {
+  mouse.active = false
+}
+
 // 窗口大小变化处理
 const handleResize = () => {
   initCanvas()
@@ -896,10 +987,19 @@ onMounted(() => {
   window.addEventListener('resize', handleResize)
   
   const container = gameContainer.value
+  const canvas = gameCanvas.value
   if (container) {
     container.addEventListener('touchstart', handleTouchStart, { passive: false })
     container.addEventListener('touchmove', handleTouchMove, { passive: false })
     container.addEventListener('touchend', handleTouchEnd)
+  }
+  
+  // 添加鼠标事件监听
+  if (canvas) {
+    canvas.addEventListener('mousedown', handleMouseDown)
+    canvas.addEventListener('mousemove', handleMouseMove)
+    canvas.addEventListener('mouseup', handleMouseUp)
+    canvas.addEventListener('mouseleave', handleMouseLeave)
   }
 })
 
@@ -914,10 +1014,19 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   
   const container = gameContainer.value
+  const canvas = gameCanvas.value
   if (container) {
     container.removeEventListener('touchstart', handleTouchStart)
     container.removeEventListener('touchmove', handleTouchMove)
     container.removeEventListener('touchend', handleTouchEnd)
+  }
+  
+  // 移除鼠标事件监听
+  if (canvas) {
+    canvas.removeEventListener('mousedown', handleMouseDown)
+    canvas.removeEventListener('mousemove', handleMouseMove)
+    canvas.removeEventListener('mouseup', handleMouseUp)
+    canvas.removeEventListener('mouseleave', handleMouseLeave)
   }
 })
 </script>
